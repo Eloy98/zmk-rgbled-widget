@@ -115,6 +115,11 @@ static void set_rgb_leds(uint8_t color, uint16_t duration_ms) {
 // separate thread
 K_MSGQ_DEFINE(led_msgq, sizeof(struct blink_item), 16, 1);
 
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE) && !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+#define INITIAL_PERIPHERAL_CONN_RETRY_COUNT 30
+#define INITIAL_PERIPHERAL_CONN_RETRY_MS 100
+#endif
+
 static void indicate_connectivity_internal(void) {
     struct blink_item blink = {.duration_ms = CONFIG_RGBLED_WIDGET_CONN_BLINK_MS};
 
@@ -411,6 +416,18 @@ extern void led_init_thread(void *d0, void *d1, void *d2) {
 
     // check and indicate current profile or peripheral connectivity status
     LOG_INF("Indicating initial connectivity status");
+
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE) && !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+    // Peripheral-side split links can come up slightly after boot. Wait briefly
+    // so the initial status reflects the actual split connection when available.
+    for (int retry = 0; retry < INITIAL_PERIPHERAL_CONN_RETRY_COUNT; retry++) {
+        if (zmk_split_bt_peripheral_is_connected()) {
+            break;
+        }
+        k_sleep(K_MSEC(INITIAL_PERIPHERAL_CONN_RETRY_MS));
+    }
+#endif
+
     indicate_connectivity();
 
 #if SHOW_LAYER_COLORS
