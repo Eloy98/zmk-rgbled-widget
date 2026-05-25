@@ -120,6 +120,18 @@ K_MSGQ_DEFINE(led_msgq, sizeof(struct blink_item), 16, 1);
 
 static struct k_work_delayable peripheral_connectivity_poll_work;
 static bool peripheral_last_connected;
+
+static void indicate_peripheral_rgb_self_test(void) {
+    static const struct blink_item self_test[] = {
+        {.color = 1, .duration_ms = 400}, // red
+        {.color = 2, .duration_ms = 400}, // green
+        {.color = 4, .duration_ms = 400}, // blue
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(self_test); i++) {
+        k_msgq_put(&led_msgq, &self_test[i], K_NO_WAIT);
+    }
+}
 #endif
 
 static void indicate_connectivity_internal(void) {
@@ -409,6 +421,12 @@ extern void led_init_thread(void *d0, void *d1, void *d2) {
     ARG_UNUSED(d0);
     ARG_UNUSED(d1);
     ARG_UNUSED(d2);
+
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE) && !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+    LOG_INF("Running peripheral RGB self-test");
+    indicate_peripheral_rgb_self_test();
+    k_sleep(K_MSEC((400 + CONFIG_RGBLED_WIDGET_INTERVAL_MS) * 3));
+#endif
 
 #if IS_ENABLED(CONFIG_ZMK_BATTERY_REPORTING)
     // check and indicate battery level on thread start
