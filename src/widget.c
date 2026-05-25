@@ -6,7 +6,6 @@
 
 #include <zmk/battery.h>
 #include <zmk/ble.h>
-#include <zmk/endpoints.h>
 #include <zmk/events/battery_state_changed.h>
 #include <zmk/events/ble_active_profile_changed.h>
 #include <zmk/events/endpoint_changed.h>
@@ -118,6 +117,9 @@ K_MSGQ_DEFINE(led_msgq, sizeof(struct blink_item), 16, 1);
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE) && !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 #define INITIAL_PERIPHERAL_CONN_RETRY_COUNT 30
 #define INITIAL_PERIPHERAL_CONN_RETRY_MS 100
+
+static struct k_work_delayable peripheral_connectivity_poll_work;
+static bool peripheral_last_connected;
 #endif
 
 static void indicate_connectivity_internal(void) {
@@ -128,31 +130,15 @@ static void indicate_connectivity_internal(void) {
     uint8_t profile_index = zmk_ble_active_profile_index();
 #endif
 
-    switch (zmk_endpoint_get_selected().transport) {
-    case ZMK_TRANSPORT_USB: // USB connected and selected
-#if IS_ENABLED(CONFIG_RGBLED_WIDGET_CONN_SHOW_USB)
-        LOG_INF("USB connected, blinking %s", color_names[CONFIG_RGBLED_WIDGET_CONN_COLOR_USB]);
-        blink.color = CONFIG_RGBLED_WIDGET_CONN_COLOR_USB;
-        break;
-#endif
-    case ZMK_TRANSPORT_BLE: // BLE connected and selected
-#if IS_ENABLED(CONFIG_ZMK_BLE)
+    if (zmk_ble_active_profile_is_connected()) {
         LOG_CONN_CENTRAL(profile_index, "connected", CONNECTED);
         blink.color = CONFIG_RGBLED_WIDGET_CONN_COLOR_CONNECTED;
-        break;
-#endif
-    default: // ZMK_TRANSPORT_NONE, neither BLE nor USB connected
-#if IS_ENABLED(CONFIG_ZMK_BLE)
-        if (zmk_endpoint_get_preferred_transport() != ZMK_TRANSPORT_NONE &&
-            zmk_ble_active_profile_is_open()) {
-            LOG_CONN_CENTRAL(profile_index, "open", ADVERTISING);
-            blink.color = CONFIG_RGBLED_WIDGET_CONN_COLOR_ADVERTISING;
-            break;
-        }
-#endif
+    } else if (zmk_ble_active_profile_is_open()) {
+        LOG_CONN_CENTRAL(profile_index, "open", ADVERTISING);
+        blink.color = CONFIG_RGBLED_WIDGET_CONN_COLOR_ADVERTISING;
+    } else {
         LOG_CONN_CENTRAL(-1, "no endpoints connected", DISCONNECTED);
         blink.color = CONFIG_RGBLED_WIDGET_CONN_COLOR_DISCONNECTED;
-        break;
     }
 #elif IS_ENABLED(CONFIG_ZMK_SPLIT_BLE)
     if (zmk_split_bt_peripheral_is_connected()) {
@@ -180,6 +166,22 @@ static void indicate_connectivity_cb(struct k_work *work) { indicate_connectivit
 void indicate_connectivity() { k_work_reschedule(&indicate_connectivity_work, K_MSEC(16)); }
 
 ZMK_LISTENER(led_output_listener, led_output_listener_cb);
+
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE) && !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+static void peripheral_connectivity_poll_cb(struct k_work *work) {
+    bool connected = zmk_split_bt_peripheral_is_connected();
+
+    if (connected != peripheral_last_connected) {
+        peripheral_last_connected = connected;
+        indicate_connectivity();
+    }
+
+    if (!connected) {
+        k_work_reschedule(&peripheral_connectivity_poll_work,
+                          K_MSEC(INITIAL_PERIPHERAL_CONN_RETRY_MS));
+    }
+}
+#endif
 
 #if !IS_ENABLED(CONFIG_ZMK_SPLIT) || IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 // run led_output_listener_cb on endpoint and BLE profile change (on central)
@@ -363,6 +365,10 @@ extern void led_process_thread(void *d0, void *d1, void *d2) {
 
     k_work_init_delayable(&indicate_connectivity_work, indicate_connectivity_cb);
 
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE) && !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+    k_work_init_delayable(&peripheral_connectivity_poll_work, peripheral_connectivity_poll_cb);
+#endif
+
 #if SHOW_LAYER_CHANGE
     k_work_init_delayable(&layer_indicate_work, indicate_layer_cb);
 #endif
@@ -426,9 +432,18 @@ extern void led_init_thread(void *d0, void *d1, void *d2) {
         }
         k_sleep(K_MSEC(INITIAL_PERIPHERAL_CONN_RETRY_MS));
     }
+
+    peripheral_last_connected = zmk_split_bt_peripheral_is_connected();
 #endif
 
     indicate_connectivity();
+
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE) && !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+    if (!peripheral_last_connected) {
+        k_work_reschedule(&peripheral_connectivity_poll_work,
+                          K_MSEC(INITIAL_PERIPHERAL_CONN_RETRY_MS));
+    }
+#endif
 
 #if SHOW_LAYER_COLORS
     LOG_INF("Setting initial layer color");
