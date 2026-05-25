@@ -93,6 +93,9 @@ uint8_t led_current_color = 0;
 
 // low-level method to control the LED
 static void set_rgb_leds(uint8_t color, uint16_t duration_ms) {
+    LOG_INF("set_rgb_leds color=%d r=%d g=%d b=%d duration=%d", color, !!(color & BIT(0)),
+            !!(color & BIT(1)), !!(color & BIT(2)), duration_ms);
+
     for (uint8_t pos = 0; pos < 3; pos++) {
         uint8_t bit = BIT(pos);
         if ((bit & led_current_color) != (bit & color)) {
@@ -421,6 +424,9 @@ extern void led_init_thread(void *d0, void *d1, void *d2) {
     ARG_UNUSED(d0);
     ARG_UNUSED(d1);
     ARG_UNUSED(d2);
+
+    LOG_INF("RGB widget init: led_dev ready=%d red_idx=%d green_idx=%d blue_idx=%d",
+            device_is_ready(led_dev), rgb_idx[0], rgb_idx[1], rgb_idx[2]);
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE) && !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
     LOG_INF("Running peripheral RGB self-test");
