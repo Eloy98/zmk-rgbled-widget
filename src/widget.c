@@ -16,11 +16,7 @@
 #include <zmk/keymap.h>
 #include <zmk/split/bluetooth/peripheral.h>
 
-#if __has_include(<zmk/split/central.h>)
 #include <zmk/split/central.h>
-#else
-#include <zmk/split/bluetooth/central.h>
-#endif
 
 #include <zephyr/logging/log.h>
 
@@ -119,31 +115,43 @@ static void set_rgb_leds(uint8_t color, uint16_t duration_ms) {
 // separate thread
 K_MSGQ_DEFINE(led_msgq, sizeof(struct blink_item), 16, 1);
 
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE) && !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+#define INITIAL_PERIPHERAL_CONN_RETRY_COUNT 30
+#define INITIAL_PERIPHERAL_CONN_RETRY_MS 100
+#endif
+
 static void indicate_connectivity_internal(void) {
     struct blink_item blink = {.duration_ms = CONFIG_RGBLED_WIDGET_CONN_BLINK_MS};
 
 #if !IS_ENABLED(CONFIG_ZMK_SPLIT) || IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-    switch (zmk_endpoints_selected().transport) {
-    case ZMK_TRANSPORT_USB:
+#if IS_ENABLED(CONFIG_ZMK_BLE)
+    uint8_t profile_index = zmk_ble_active_profile_index();
+#endif
+
+    switch (zmk_endpoint_get_selected().transport) {
+    case ZMK_TRANSPORT_USB: // USB connected and selected
 #if IS_ENABLED(CONFIG_RGBLED_WIDGET_CONN_SHOW_USB)
         LOG_INF("USB connected, blinking %s", color_names[CONFIG_RGBLED_WIDGET_CONN_COLOR_USB]);
         blink.color = CONFIG_RGBLED_WIDGET_CONN_COLOR_USB;
         break;
 #endif
-    default: // ZMK_TRANSPORT_BLE
+    case ZMK_TRANSPORT_BLE: // BLE connected and selected
 #if IS_ENABLED(CONFIG_ZMK_BLE)
-        uint8_t profile_index = zmk_ble_active_profile_index();
-        if (zmk_ble_active_profile_is_connected()) {
-            LOG_CONN_CENTRAL(profile_index, "connected", CONNECTED);
-            blink.color = CONFIG_RGBLED_WIDGET_CONN_COLOR_CONNECTED;
-        } else if (zmk_ble_active_profile_is_open()) {
+        LOG_CONN_CENTRAL(profile_index, "connected", CONNECTED);
+        blink.color = CONFIG_RGBLED_WIDGET_CONN_COLOR_CONNECTED;
+        break;
+#endif
+    default: // ZMK_TRANSPORT_NONE, neither BLE nor USB connected
+#if IS_ENABLED(CONFIG_ZMK_BLE)
+        if (zmk_endpoint_get_preferred_transport() != ZMK_TRANSPORT_NONE &&
+            zmk_ble_active_profile_is_open()) {
             LOG_CONN_CENTRAL(profile_index, "open", ADVERTISING);
             blink.color = CONFIG_RGBLED_WIDGET_CONN_COLOR_ADVERTISING;
-        } else {
-            LOG_CONN_CENTRAL(profile_index, "not connected", DISCONNECTED);
-            blink.color = CONFIG_RGBLED_WIDGET_CONN_COLOR_DISCONNECTED;
+            break;
         }
 #endif
+        LOG_CONN_CENTRAL(-1, "no endpoints connected", DISCONNECTED);
+        blink.color = CONFIG_RGBLED_WIDGET_CONN_COLOR_DISCONNECTED;
         break;
     }
 #elif IS_ENABLED(CONFIG_ZMK_SPLIT_BLE)
@@ -225,22 +233,14 @@ void indicate_battery(void) {
     IS_ENABLED(CONFIG_RGBLED_WIDGET_BATTERY_SHOW_ONLY_PERIPHERALS)
     for (uint8_t i = 0; i < ZMK_SPLIT_BLE_PERIPHERAL_COUNT; i++) {
         uint8_t peripheral_level;
-#if __has_include(<zmk/split/central.h>)
         int ret = zmk_split_central_get_peripheral_battery_level(i, &peripheral_level);
-#else
-        int ret = zmk_split_get_peripheral_battery_level(i, &peripheral_level);
-#endif
         if (ret == 0) {
             retry = 0;
             while (peripheral_level == 0 && retry++ < (CONFIG_RGBLED_WIDGET_BATTERY_BLINK_MS +
                                                        CONFIG_RGBLED_WIDGET_INTERVAL_MS) /
                                                           100) {
                 k_sleep(K_MSEC(100));
-#if __has_include(<zmk/split/central.h>)
                 zmk_split_central_get_peripheral_battery_level(i, &peripheral_level);
-#else
-                zmk_split_get_peripheral_battery_level(i, &peripheral_level);
-#endif
             }
 
             LOG_INF("Got battery level for peripheral %d:", i);
@@ -416,6 +416,18 @@ extern void led_init_thread(void *d0, void *d1, void *d2) {
 
     // check and indicate current profile or peripheral connectivity status
     LOG_INF("Indicating initial connectivity status");
+
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE) && !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+    // Peripheral-side split links can come up slightly after boot. Wait briefly
+    // so the initial status reflects the actual split connection when available.
+    for (int retry = 0; retry < INITIAL_PERIPHERAL_CONN_RETRY_COUNT; retry++) {
+        if (zmk_split_bt_peripheral_is_connected()) {
+            break;
+        }
+        k_sleep(K_MSEC(INITIAL_PERIPHERAL_CONN_RETRY_MS));
+    }
+#endif
+
     indicate_connectivity();
 
 #if SHOW_LAYER_COLORS
